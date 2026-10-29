@@ -230,6 +230,101 @@ def update_production():
 
     print(f"Обновлён production.csv: {len(rows)} партий")
 
+def rename(component, newname):
+    component = component.strip()
+    newname = newname.strip()
+
+    if not component or not newname:
+        print("Ошибка: старое и новое имена обязательны.")
+        return
+
+    if component == newname:
+        print("Старое и новое имена совпадают.")
+        return
+
+    files = [TRANSACTIONS_FILE, ORDERED_FILE]
+    files.extend(BOM_DIR.glob("*.csv"))
+
+    # Проверяем, не занято ли новое имя другим компонентом.
+    for path in files:
+        if not path.exists():
+            continue
+
+        try:
+            with path.open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as file:
+                reader = csv.DictReader(file)
+
+                if "component" not in (reader.fieldnames or []):
+                    continue
+
+                for row in reader:
+                    if row.get("component") == newname:
+                        print(
+                            f"Ошибка: компонент {newname} "
+                            f"уже существует в файле {path.name}."
+                        )
+                        return
+
+        except (OSError, csv.Error) as error:
+            print(f"Ошибка чтения {path.name}: {error}")
+            return
+
+    changed = 0
+
+    # Переименовываем компонент во всех нужных файлах.
+    for path in files:
+        if not path.exists():
+            continue
+
+        try:
+            with path.open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as file:
+                reader = csv.DictReader(file)
+                fieldnames = reader.fieldnames or []
+                rows = list(reader)
+
+            if "component" not in fieldnames:
+                continue
+
+            file_changed = 0
+
+            for row in rows:
+                if row.get("component") == component:
+                    row["component"] = newname
+                    file_changed += 1
+
+            if file_changed:
+                with path.open(
+                    "w", encoding="utf-8-sig", newline=""
+                ) as file:
+                    writer = csv.DictWriter(
+                        file,
+                        fieldnames=fieldnames,
+                    )
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+                changed += file_changed
+                print(
+                    f"{path.name}: "
+                    f"переименовано записей — {file_changed}"
+                )
+
+        except (OSError, csv.Error) as error:
+            print(f"Ошибка обработки {path.name}: {error}")
+            return
+
+    if changed:
+        print(
+            f"Готово: {component} → {newname}. "
+            f"Всего переименовано записей: {changed}."
+        )
+        update_stock()
+    else:
+        print(f"Компонент {component} не найден.")
 
 def add(component, quantity, unit_cost, comment):
     component = component.strip()
@@ -313,7 +408,7 @@ def add(component, quantity, unit_cost, comment):
     # Автоматически обновляем остатки после успешного добавления.
     update_stock()
 
-def ordered(component, quantity, order_id, comment):
+def ordered(component, quantity, order_id, total_cost, comment):
     component = component.strip()
     order_id = order_id.strip()
     comment = comment.strip()
@@ -332,11 +427,25 @@ def ordered(component, quantity, order_id, comment):
         print("Ошибка: количество должно быть больше нуля.")
         return
 
+    try:
+        total_cost = float(total_cost)
+    except ValueError:
+        print("Ошибка: стоимость должна быть числом.")
+        return
+
+    if not 0 < total_cost < float("inf"):
+        print("Ошибка: стоимость должна быть положительным конечным числом.")
+        return
+
+    unit_cost = total_cost / quantity
+
     fieldnames = [
         "date",
         "order_id",
         "component",
         "quantity",
+        "total_cost",
+        "unit_cost",
         "comment",
         "status",
         "received_date",
@@ -349,47 +458,58 @@ def ordered(component, quantity, order_id, comment):
             writer = csv.DictWriter(file, fieldnames=fieldnames)
             writer.writeheader()
 
-    with ORDERED_FILE.open(
-        "r", encoding="utf-8-sig", newline=""
-    ) as file:
-        reader = csv.DictReader(file)
-        orders = list(reader)
-        old_fieldnames = reader.fieldnames or []
-
-    if any(row["order_id"] == order_id for row in orders):
-        print(f"Ошибка: номер заказа {order_id} уже существует.")
-        return
-
-    # Поддерживаем старый формат файла.
-    for row in orders:
-        row.setdefault("status", "ordered")
-        row.setdefault("received_date", "")
-
-    if old_fieldnames != fieldnames:
+    try:
         with ORDERED_FILE.open(
-            "w", encoding="utf-8-sig", newline=""
+            "r", encoding="utf-8-sig", newline=""
+        ) as file:
+            reader = csv.DictReader(file)
+            old_fieldnames = reader.fieldnames or []
+            orders = list(reader)
+
+        if any(row.get("order_id") == order_id for row in orders):
+            print(f"Ошибка: номер заказа {order_id} уже существует.")
+            return
+
+        # Добавляем новые поля, сохраняя старые записи.
+        for row in orders:
+            row.setdefault("total_cost", "")
+            row.setdefault("unit_cost", "")
+            row.setdefault("status", "ordered")
+            row.setdefault("received_date", "")
+
+        # Обновляем заголовки, если структура CSV изменилась.
+        if old_fieldnames != fieldnames:
+            with ORDERED_FILE.open(
+                "w", encoding="utf-8-sig", newline=""
+            ) as file:
+                writer = csv.DictWriter(file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(orders)
+
+        with ORDERED_FILE.open(
+            "a", encoding="utf-8-sig", newline=""
         ) as file:
             writer = csv.DictWriter(file, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(orders)
+            writer.writerow({
+                "date": TODAY,
+                "order_id": order_id,
+                "component": component,
+                "quantity": quantity,
+                "total_cost": total_cost,
+                "unit_cost": unit_cost,
+                "comment": comment,
+                "status": "ordered",
+                "received_date": "",
+            })
 
-    with ORDERED_FILE.open(
-        "a", encoding="utf-8-sig", newline=""
-    ) as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writerow({
-            "date": TODAY,
-            "order_id": order_id,
-            "component": component,
-            "quantity": quantity,
-            "comment": comment,
-            "status": "ordered",
-            "received_date": "",
-        })
+    except (OSError, csv.Error) as error:
+        print(f"Ошибка работы со списком заказов: {error}")
+        return
 
     print(
         f"Заказ зарегистрирован: {component}, "
-        f"{quantity} шт., ID {order_id}."
+        f"{quantity} шт., общая стоимость {total_cost:.2f}, "
+        f"цена за штуку {unit_cost:.2f}, ID {order_id}."
     )
 
 def receive(order_id):
@@ -417,6 +537,8 @@ def receive(order_id):
 
         # Поддерживаем старый формат файла.
         for row in orders:
+            row.setdefault("total_cost", "")
+            row.setdefault("unit_cost", "")
             row.setdefault("status", "ordered")
             row.setdefault("received_date", "")
 
@@ -425,6 +547,8 @@ def receive(order_id):
             "order_id",
             "component",
             "quantity",
+            "total_cost",
+            "unit_cost",
             "comment",
             "status",
             "received_date",
@@ -460,7 +584,10 @@ def receive(order_id):
         for row in matching:
             print(f'  {row["component"]}: {row["quantity"]} шт.')
 
-        print("Не забудь проверить компоненты и внести их на склад командой add.")
+        print("\nПроверь полученные компоненты.")
+        print("Если всё в порядке, внеси их на склад командой:")
+        for row in matching:
+            print(f'  add {row["component"]} {row["quantity"]} {row["unit_cost"]}')
 
     except (OSError, csv.Error) as error:
         print(f"Ошибка обработки заказа: {error}")
@@ -607,6 +734,169 @@ def bom(device):
 
     print("-" * 60)
     print(f"Всего позиций в BOM: {len(validated_rows)}")
+
+def bomadd(device, component, quantity):
+    if not device or "/" in device or "\\" in device:
+        print("Ошибка: укажи корректное название устройства.")
+        return
+
+    component = component.strip()
+
+    if not component:
+        print("Ошибка: укажи название компонента.")
+        return
+
+    try:
+        quantity = float(quantity)
+    except ValueError:
+        print("Ошибка: количество должно быть числом.")
+        return
+
+    if quantity <= 0:
+        print("Ошибка: количество должно быть больше нуля.")
+        return
+
+    bom_file = BOM_DIR / f"{device}.csv"
+
+    if not bom_file.is_file():
+        print(f"Ошибка: BOM-файл не найден: {bom_file.name}")
+        return
+
+    try:
+        with bom_file.open("r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+
+            if not reader.fieldnames or not {
+                "component", "quantity_per_device"
+            }.issubset(reader.fieldnames):
+                print("Ошибка: некорректный формат BOM.")
+                return
+
+            rows = list(reader)
+
+        found = False
+
+        for row in rows:
+            name = (row.get("component") or "").strip()
+
+            if name == component:
+                current = float(row["quantity_per_device"])
+                row["quantity_per_device"] = str(current + quantity)
+                found = True
+                break
+
+        if not found:
+            rows.append({
+                "component": component,
+                "quantity_per_device": str(quantity),
+            })
+
+        with bom_file.open("w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=["component", "quantity_per_device"],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+    except (OSError, ValueError, KeyError, csv.Error) as error:
+        print(f"Ошибка работы с BOM: {error}")
+        return
+
+    print(
+        f"BOM {device}: компонент {component}, "
+        f"добавлено {quantity:g}."
+    )
+
+def bomdel(device, component, quantity=None):
+    if not device or "/" in device or "\\" in device:
+        print("Ошибка: укажи корректное название устройства.")
+        return
+
+    component = component.strip()
+
+    if not component:
+        print("Ошибка: укажи название компонента.")
+        return
+
+    if quantity is not None:
+        try:
+            quantity = float(quantity)
+        except ValueError:
+            print("Ошибка: количество должно быть числом.")
+            return
+
+        if quantity <= 0:
+            print("Ошибка: количество должно быть больше нуля.")
+            return
+
+    bom_file = BOM_DIR / f"{device}.csv"
+
+    if not bom_file.is_file():
+        print(f"Ошибка: BOM-файл не найден: {bom_file.name}")
+        return
+
+    try:
+        with bom_file.open("r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+
+            if not reader.fieldnames or not {
+                "component", "quantity_per_device"
+            }.issubset(reader.fieldnames):
+                print("Ошибка: некорректный формат BOM.")
+                return
+
+            rows = list(reader)
+
+        updated_rows = []
+        found = False
+
+        for row in rows:
+            name = (row.get("component") or "").strip()
+
+            if name != component:
+                updated_rows.append(row)
+                continue
+
+            if found:
+                updated_rows.append(row)
+                continue
+
+            found = True
+
+            if quantity is None:
+                continue
+
+            current = float(row["quantity_per_device"])
+            remaining = current - quantity
+
+            if remaining > 0:
+                row["quantity_per_device"] = str(remaining)
+                updated_rows.append(row)
+
+        if not found:
+            print(f"Ошибка: компонент {component} не найден в BOM.")
+            return
+
+        with bom_file.open("w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(
+                file,
+                fieldnames=["component", "quantity_per_device"],
+            )
+            writer.writeheader()
+            writer.writerows(updated_rows)
+
+    except (OSError, ValueError, KeyError, csv.Error) as error:
+        print(f"Ошибка работы с BOM: {error}")
+        return
+
+    if quantity is None:
+        print(f"BOM {device}: компонент {component} удалён.")
+    else:
+        print(
+            f"BOM {device}: количество компонента {component} "
+            f"уменьшено на {quantity:g}."
+        )
 
 def buy(device, count):
     if not device or "/" in device or "\\" in device:
@@ -1470,23 +1760,45 @@ def undo_transaction(transaction_type):
         print(f"Ошибка отмены транзакции: {error}")
 
 def complete_component(text, state):
-    """Автодополнение названий компонентов из истории транзакций."""
-    try:
-        with open(TRANSACTIONS_FILE, "r", encoding="utf-8", newline="") as f:
-            rows = csv.DictReader(f)
-            components = sorted({
-                row["component"]
-                for row in rows
-                if row.get("component")
-            })
-    except (OSError, KeyError, csv.Error):
-        components = []
+    """Автодополнение компонентов из транзакций и BOM-файлов."""
+    components = set()
 
-    matches = [
-        component
-        for component in components
-        if component.lower().startswith(text.lower())
-    ]
+    # Компоненты из истории транзакций.
+    try:
+        with TRANSACTIONS_FILE.open(
+            "r", encoding="utf-8-sig", newline=""
+        ) as file:
+            for row in csv.DictReader(file):
+                if row.get("type") not in {"add", "remove"}:
+                    continue
+
+                component = (row.get("component") or "").strip()
+                if component:
+                    components.add(component)
+    except (OSError, csv.Error):
+        pass
+
+    # Компоненты из всех BOM-файлов.
+    try:
+        for bom_file in BOM_DIR.glob("*.csv"):
+            with bom_file.open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as file:
+                for row in csv.DictReader(file):
+                    component = (row.get("component") or "").strip()
+                    if component:
+                        components.add(component)
+    except (OSError, csv.Error):
+        pass
+
+    matches = sorted(
+        (
+            component
+            for component in components
+            if component.lower().startswith(text.lower())
+        ),
+        key=str.lower,
+    )
 
     return matches[state] if state < len(matches) else None
 
@@ -1533,17 +1845,11 @@ def tab_complete(text, state):
     line = readline.get_line_buffer()
     parts = line.split()
 
+    #print(f"\nDEBUG line={line!r}, parts={parts!r}, text={text!r}")
+
     commands = [
-        "add",
-        "remove",
-        "ordered",
-        "receive",
-        "bom",
-        "make",
-        "buy",
-        "stock",
-        "production",
-        "init",
+        "add", "remove", "rename", "ordered", "receive", "bom",
+        "bomadd", "bomdel", "make", "buy", "stock", "production", "init",
         "quit",
     ]
 
@@ -1556,14 +1862,26 @@ def tab_complete(text, state):
         return matches[state] if state < len(matches) else None
 
     # Автодополнение компонентов
-    if parts[0] in {"ordered", "add", "remove"} and len(parts) <= 2:
+    if parts[0] in {"ordered", "add", "remove", "rename"} and len(parts) <= 2:
         return complete_component(text, state)
 
+    # BOMADD / BOMDEL
+    if parts[0] in {"bomadd", "bomdel"}:
+        if len(parts) == 1:
+            return complete_bom(text, state)
+        elif len(parts) == 2:
+            if line.endswith(" "):
+                return complete_component(text, state)
+            else:
+                return complete_bom(text, state)
+        elif len(parts) == 3:
+            return complete_component(text, state)
+
     # Автодополнение названий BOM
-    if parts[0] in ("buy", "make") and len(parts) <= 2:
+    if parts[0] in {"buy", "make", "bom"} and len(parts) <= 2:
         return complete_bom(text, state)
 
-    # Автодополнение активных заказов
+    # Автодополнение активных заказов                           
     if parts[0] == "receive" and len(parts) <= 2:
         return complete_order(text, state)
 
@@ -1580,6 +1898,8 @@ def ensure_data_files():
             "order_id",
             "component",
             "quantity",
+            "total_cost",
+            "unit_cost",
             "comment",
             "status",
             "received_date",
@@ -1609,7 +1929,9 @@ def ensure_data_files():
 
 def main():
     ensure_data_files()
-    print("Учёт компонентов. Команды: add, remove, undo, stock, make, buy, init, production, quit")
+    print(  "Учёт компонентов. Команды: " 
+            "add, remove, rename, bom, ordered, receive, bomadd, bomdel, undo, stock, make, buy, quit"
+            )
 
     try:
         readline.read_history_file(HISTORY_FILE)
@@ -1654,8 +1976,23 @@ def main():
                 if len(parts) != 2:
                     print("Формат: bom DEVICE")
                     continue
-
                 bom(parts[1])
+
+            elif parts[0] == "bomadd":
+                if len(parts) != 4:
+                    print("Формат: bomadd DEVICE COMPONENT QUANTITY")
+                    continue
+
+                bomadd(parts[1], parts[2], parts[3])
+
+            elif parts[0] == "bomdel":
+                if len(parts) not in (3, 4):
+                    print("Формат: bomdel DEVICE COMPONENT [QUANTITY]")
+                    continue
+
+                quantity = parts[3] if len(parts) == 4 else None
+                bomdel(parts[1], parts[2], quantity)
+
             elif parts[0] == "make":
                 if len(parts) != 4:
                     print('Формат: make DEVICE COUNT "COMMENT"')
@@ -1669,14 +2006,24 @@ def main():
 
                 buy(parts[1], parts[2])
 
+            elif parts[0] == "rename":
+                if len(parts) != 3:
+                    print("Формат: rename DEVICE NEWNAME")
+                    continue
+
+                rename(parts[1], parts[2])
+
             elif command == "stock":
                 update_stock()
 
             elif parts[0] == "ordered":
-                if len(parts) != 5:
-                    print('Формат: ordered COMPONENT QUANTITY ORDER_ID "COMMENT"')
+                if len(parts) != 6:
+                    print(
+                        'Формат: ordered COMPONENT QUANTITY '
+                        'ORDER_ID TOTAL_COST "COMMENT"'
+                    )
                     continue
-                ordered(parts[1], parts[2], parts[3], parts[4])
+                ordered(parts[1],parts[2],parts[3],parts[4],parts[5],)
 
             elif parts[0] == "receive":
                 if len(parts) != 2:

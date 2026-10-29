@@ -1,4 +1,4 @@
-component,quantity_per_device
+﻿component,quantity_per_device
 TEST_CPU,1
 TEST_RAM,2
 TEST_DAC,1
@@ -9,3 +9,4 @@ TEST_CAP_10U,2
 TEST_ENCODER,4
 TEST_POT,3
 TEST_OLED,1
+ASSEMBLY_Vadim,1.0
