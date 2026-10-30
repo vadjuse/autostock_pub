@@ -7,6 +7,9 @@ from pathlib import Path
 
 import atexit
 
+import shutil
+from datetime import datetime
+
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -143,6 +146,91 @@ def update_stock():
         writer.writerows(rows)
 
     print(f"Обновлён stock.csv: {len(rows)} строк")
+
+def stock_search(prefix):
+    """Ищет компоненты по началу названия в stock.csv и ordered.csv."""
+
+    rows = []
+
+    # Складские остатки
+    if STOCK_FILE.exists():
+        with STOCK_FILE.open("r", encoding="utf-8-sig", newline="") as file:
+            for row in csv.DictReader(file):
+                component = (row.get("component") or "").strip()
+
+                if component.startswith(prefix):
+                    rows.append([
+                        component,
+                        row["stock"],
+                        f'{float(row["unit_cost"]):.2f}',
+                        "СКЛАД",
+                    ])
+
+    # Заказанные компоненты
+    if ORDERED_FILE.exists():
+        with ORDERED_FILE.open("r", encoding="utf-8-sig", newline="") as file:
+            for row in csv.DictReader(file):
+                component = (row.get("component") or "").strip()
+
+                if (
+                    component.startswith(prefix)
+                    and row.get("status") == "ordered"
+                ):
+                    quantity = int(row["quantity"])
+                    total_cost = float(row["total_cost"])
+                    unit_cost = total_cost / quantity
+
+                    rows.append([
+                        component,
+                        str(quantity),
+                        f"{unit_cost:.2f}",
+                        "ЗАКАЗАНО",
+                    ])
+
+    if not rows:
+        print(f"Совпадений для «{prefix}» не найдено.")
+        return
+
+    # Считаем суммарные количества
+    total_stock = sum(
+        int(row[1]) for row in rows if row[3] == "СКЛАД"
+    )
+    total_ordered = sum(
+        int(row[1]) for row in rows if row[3] == "ЗАКАЗАНО"
+    )
+
+    headers = ["Компонент", "Количество", "Цена, руб./шт.", "Статус"]
+
+    # Вычисляем ширину столбцов
+    widths = [
+        max(len(headers[i]), *(len(row[i]) for row in rows))
+        for i in range(len(headers))
+    ]
+
+    # Формируем разделительную линию
+    separator = "+".join("-" * (width + 2) for width in widths)
+
+    print()
+    print(
+        "|".join(
+            f" {headers[i]:<{widths[i]}} "
+            for i in range(len(headers))
+        )
+    )
+    print(separator)
+
+    for row in rows:
+        print(
+            "|".join(
+                f" {row[i]:>{widths[i]}} " if i in (1, 2)
+                else f" {row[i]:<{widths[i]}} "
+                for i in range(len(row))
+            )
+        )
+
+    print()
+    print(f"На складе: {total_stock} шт.  |  Заказано: {total_ordered} шт.")
+    print()
 
 def update_production():
     batches = {}
@@ -1842,7 +1930,7 @@ def complete_order(text, state):
             orders = csv.DictReader(file)
             matches = [
                 row for row in orders
-                if row["order_id"].lower().startswith(text.lower())
+                if row["status"] == "ordered" and row["order_id"].lower().startswith(text.lower())
             ]
     except (OSError, csv.Error, KeyError):
         matches = []
@@ -1880,7 +1968,7 @@ def tab_complete(text, state):
         return matches[state] if state < len(matches) else None
 
     # Автодополнение компонентов
-    if parts[0] in {"ordered", "add", "remove", "rename"} and len(parts) <= 2:
+    if parts[0] in {"ordered", "add", "remove", "rename", "stock"} and len(parts) <= 2:
         return complete_component(text, state)
 
     # BOMADD / BOMDEL
@@ -1906,7 +1994,7 @@ def tab_complete(text, state):
     return None
 
 def ensure_data_files():
-    """Создаёт отсутствующие CSV-файлы с заголовками."""
+    """Создаёт отсутствующие CSV, проверяет и обновляет существующие."""
 
     files = {
         TRANSACTIONS_FILE: FIELDS,
@@ -1933,16 +2021,109 @@ def ensure_data_files():
         ],
     }
 
-    for path, fieldnames in files.items():
-        if path.exists():
+    print("\nПроверка CSV-файлов:\n")
+
+    for path, expected_fields in files.items():
+
+        # Создаём отсутствующий файл.
+        if not path.exists():
+            with path.open(
+                "w", encoding="utf-8-sig", newline=""
+            ) as file:
+                writer = csv.writer(file)
+                writer.writerow(expected_fields)
+
+            print(f"[CREATED] {path.name}")
             continue
 
-        with path.open("w", encoding="utf-8-sig", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow(fieldnames)
+        try:
+            # Читаем существующий файл.
+            with path.open(
+                "r", encoding="utf-8-sig", newline=""
+            ) as file:
+                reader = csv.DictReader(file)
+                actual_fields = reader.fieldnames or []
+                rows = list(reader)
 
-        print(f"Создан файл {path.name}")
+            missing = [
+                field for field in expected_fields
+                if field not in actual_fields
+            ]
 
+            extra = [
+                field for field in actual_fields
+                if field not in expected_fields
+            ]
+
+            if actual_fields == expected_fields:
+                print(f"[OK] {path.name}")
+                continue
+
+            # Создаём резервную копию с уникальным именем.
+            backup_path = None
+
+            for attempt in range(10):
+                timestamp = datetime.now().strftime(
+                    "%Y%m%d_%H%M%S_%f"
+                )
+
+                suffix = f"_{attempt}" if attempt else ""
+                backup_path = path.with_name(
+                    f"{path.stem}_{timestamp}{suffix}{path.suffix}"
+                )
+
+                if not backup_path.exists():
+                    break
+            else:
+                print(
+                    f"[ERROR] Не удалось создать уникальное имя "
+                    f"резервной копии для {path.name}."
+                )
+                continue
+
+            shutil.copy2(path, backup_path)
+
+            # Формируем строки с новой структурой.
+            updated_rows = []
+
+            for row in rows:
+                updated_rows.append({
+                    field: row.get(field, "")
+                    for field in expected_fields
+                })
+
+            # Сохраняем файл с новыми заголовками.
+            with path.open(
+                "w", encoding="utf-8-sig", newline=""
+            ) as file:
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=expected_fields,
+                )
+                writer.writeheader()
+                writer.writerows(updated_rows)
+
+            print(f"[UPDATED] {path.name}")
+            print(f"  Резервная копия: {backup_path.name}")
+
+            if missing:
+                print(
+                    f"  Добавлены столбцы: {', '.join(missing)} "
+                    "(пустые значения)"
+                )
+
+            if extra:
+                print(
+                    f"  Удалены столбцы: {', '.join(extra)}"
+                )
+
+            if not missing and not extra:
+                print("  Изменён порядок столбцов.")
+
+        except (OSError, csv.Error) as error:
+            print(f"[ERROR] {path.name}: {error}")
+
+    print("\nПроверка завершена.\n")
 
 def main():
     ensure_data_files()
@@ -2025,13 +2206,19 @@ def main():
 
             elif parts[0] == "rename":
                 if len(parts) != 3:
-                    print("Формат: rename DEVICE NEWNAME")
+                    print("Формат: rename COMPONENT NEWNAME")
                     continue
 
                 rename(parts[1], parts[2])
 
-            elif command == "stock":
-                update_stock()
+            elif parts[0] == "stock":
+                if len(parts) == 1:
+                    update_stock()
+                elif len(parts) == 2:
+                    update_stock()
+                    stock_search(parts[1])
+                else:
+                    print("Формат: stock COMPONENT[PREFIX]")
 
             elif parts[0] == "ordered":
                 if len(parts) != 6:
@@ -2055,7 +2242,7 @@ def main():
                     continue
 
                 if parts[1] not in ("add", "remove", "make"):
-                    print("Пока доступны: undo add, undo remove")
+                    print("Пока доступны: undo add, undo remove, undo make")
                     continue
 
                 undo_transaction(parts[1])
