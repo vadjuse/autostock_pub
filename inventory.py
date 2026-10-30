@@ -437,15 +437,12 @@ def ordered(component, quantity, order_id, total_cost, comment):
         print("Ошибка: стоимость должна быть положительным конечным числом.")
         return
 
-    unit_cost = total_cost / quantity
-
     fieldnames = [
         "date",
         "order_id",
         "component",
         "quantity",
         "total_cost",
-        "unit_cost",
         "comment",
         "status",
         "received_date",
@@ -463,40 +460,32 @@ def ordered(component, quantity, order_id, total_cost, comment):
             "r", encoding="utf-8-sig", newline=""
         ) as file:
             reader = csv.DictReader(file)
-            old_fieldnames = reader.fieldnames or []
             orders = list(reader)
 
         if any(row.get("order_id") == order_id for row in orders):
             print(f"Ошибка: номер заказа {order_id} уже существует.")
             return
 
-        # Добавляем новые поля, сохраняя старые записи.
+        # Удаляем производное поле unit_cost из старых записей.
         for row in orders:
+            row.pop("unit_cost", None)
             row.setdefault("total_cost", "")
-            row.setdefault("unit_cost", "")
             row.setdefault("status", "ordered")
             row.setdefault("received_date", "")
 
-        # Обновляем заголовки, если структура CSV изменилась.
-        if old_fieldnames != fieldnames:
-            with ORDERED_FILE.open(
-                "w", encoding="utf-8-sig", newline=""
-            ) as file:
-                writer = csv.DictWriter(file, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(orders)
-
+        # Перезаписываем файл с актуальной структурой.
         with ORDERED_FILE.open(
-            "a", encoding="utf-8-sig", newline=""
+            "w", encoding="utf-8-sig", newline=""
         ) as file:
             writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(orders)
             writer.writerow({
                 "date": TODAY,
                 "order_id": order_id,
                 "component": component,
                 "quantity": quantity,
                 "total_cost": total_cost,
-                "unit_cost": unit_cost,
                 "comment": comment,
                 "status": "ordered",
                 "received_date": "",
@@ -509,7 +498,7 @@ def ordered(component, quantity, order_id, total_cost, comment):
     print(
         f"Заказ зарегистрирован: {component}, "
         f"{quantity} шт., общая стоимость {total_cost:.2f}, "
-        f"цена за штуку {unit_cost:.2f}, ID {order_id}."
+        f"ID {order_id}."
     )
 
 def receive(order_id):
@@ -528,7 +517,6 @@ def receive(order_id):
             "r", encoding="utf-8-sig", newline=""
         ) as file:
             reader = csv.DictReader(file)
-            fieldnames = reader.fieldnames or []
             orders = list(reader)
 
         if not orders:
@@ -538,9 +526,9 @@ def receive(order_id):
         # Поддерживаем старый формат файла.
         for row in orders:
             row.setdefault("total_cost", "")
-            row.setdefault("unit_cost", "")
             row.setdefault("status", "ordered")
             row.setdefault("received_date", "")
+            row.pop("unit_cost", None)
 
         fieldnames = [
             "date",
@@ -548,7 +536,6 @@ def receive(order_id):
             "component",
             "quantity",
             "total_cost",
-            "unit_cost",
             "comment",
             "status",
             "received_date",
@@ -567,6 +554,22 @@ def receive(order_id):
             print(f"Заказ {order_id} уже получен.")
             return
 
+        # Проверяем данные для расчёта до изменения статуса.
+        for row in matching:
+            try:
+                quantity = int(row["quantity"])
+                total_cost = float(row["total_cost"])
+
+                if quantity <= 0 or not 0 < total_cost < float("inf"):
+                    raise ValueError
+
+            except (ValueError, TypeError):
+                print(
+                    f'Ошибка в данных заказа: {row["component"]}. '
+                    "Проверь количество и общую стоимость в ordered.csv."
+                )
+                return
+
         # Отмечаем все строки этого заказа как полученные.
         for row in matching:
             row["status"] = "received"
@@ -582,12 +585,27 @@ def receive(order_id):
         print(f"Заказ {order_id} отмечен как полученный.")
 
         for row in matching:
-            print(f'  {row["component"]}: {row["quantity"]} шт.')
+            quantity = int(row["quantity"])
+            total_cost = float(row["total_cost"])
+            unit_cost = total_cost / quantity
+
+            print(
+                f'  {row["component"]}: '
+                f'{quantity} шт., {total_cost:.2f}'
+            )
 
         print("\nПроверь полученные компоненты.")
-        print("Если всё в порядке, внеси их на склад командой:")
+        print("Если всё в порядке, внеси их на склад командами:")
+
         for row in matching:
-            print(f'  add {row["component"]} {row["quantity"]} {row["unit_cost"]}')
+            quantity = int(row["quantity"])
+            total_cost = float(row["total_cost"])
+            unit_cost = total_cost / quantity
+
+            print(
+                f'  add {row["component"]} '
+                f'{quantity} {unit_cost:.2f}'
+            )
 
     except (OSError, csv.Error) as error:
         print(f"Ошибка обработки заказа: {error}")
@@ -1899,7 +1917,6 @@ def ensure_data_files():
             "component",
             "quantity",
             "total_cost",
-            "unit_cost",
             "comment",
             "status",
             "received_date",
